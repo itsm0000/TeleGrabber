@@ -9,11 +9,13 @@ Flow:
   POST /api/auth/verify-2fa   → submits cloud password for 2FA accounts
   GET  /api/auth/status       → checks if a phone session is already authorized
 """
+
 from __future__ import annotations
 
 import logging
 
 from fastapi import APIRouter, HTTPException, status
+from telethon import TelegramClient
 
 from app.models.schemas import (
     AuthStatusResponse,
@@ -33,23 +35,40 @@ try:
         PasswordHashInvalidError,
         FloodWaitError,
         PhoneNumberInvalidError,
+        AuthKeyError,
+        SessionRevokedError,
     )
 except ImportError:
     # Allows schema tests to import without Telethon installed
     class PhoneCodeExpiredError(Exception): ...
+
     class PhoneCodeInvalidError(Exception): ...
+
     class SessionPasswordNeededError(Exception): ...
+
     class PasswordHashInvalidError(Exception): ...
-    class FloodWaitError(Exception): seconds = 0
+
+    class FloodWaitError(Exception):
+        seconds = 0
+
     class PhoneNumberInvalidError(Exception): ...
+
+    class AuthKeyError(Exception): ...
+
+    class SessionRevokedError(Exception): ...
+
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-# Temporary in-memory store for phone_code_hash — this is short-lived
+# Temporary in-memory store for phone_code_hash and client — this is short-lived
 # (expires within minutes; no need to persist in DB)
-_pending_hashes: dict[str, str] = {}  # phone → phone_code_hash
+# CRITICAL: Must store the same client instance that generated the phone_code_hash,
+# as the hash is bound to that specific client session.
+_pending_hashes: dict[
+    str, tuple[str, TelegramClient]
+] = {}  # phone → (phone_code_hash, client)
 
 
 @router.post("/send-code", response_model=SendCodeResponse)
@@ -71,8 +90,8 @@ async def send_code(body: SendCodeRequest) -> SendCodeResponse:
             )
 
         result = await client.send_code_request(phone)
-        _pending_hashes[phone] = result.phone_code_hash
-        logger.info("OTP sent to %s", phone)
+        _pending_hashes[phone] = (result.phone_code_hash, client)
+        logger.info("OTP sent to %s (hash bound to client at %s)", phone, id(client))
         return SendCodeResponse(phone_code_hash=result.phone_code_hash)
 
     except PhoneNumberInvalidError:
@@ -82,8 +101,22 @@ async def send_code(body: SendCodeRequest) -> SendCodeResponse:
             status.HTTP_429_TOO_MANY_REQUESTS,
             f"Rate limited by Telegram — retry in {exc.seconds}s.",
         )
+    except (AuthKeyError, SessionRevokedError) as exc:
+        # Session is invalid/corrupted — user needs to clear and re-authenticate
+        logger.warning("Session invalid for %s: %s", phone, exc)
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "Session expired or invalid. Call /api/auth/clear-session to reset and try again.",
+        )
     except Exception as exc:
         logger.exception("send-code failed for %s", phone)
+        # Check if the error message indicates an invalid session
+        error_str = str(exc).lower()
+        if "no valid" in error_str or "session" in error_str:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED,
+                "Session expired or invalid. Call /api/auth/clear-session to reset and try again.",
+            )
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
 
 
@@ -96,20 +129,26 @@ async def verify_code(body: VerifyCodeRequest) -> AuthStatusResponse:
     `{"2fa_required": true}` — the client should then call /verify-2fa.
     """
     phone = body.phone.strip()
-    phone_code_hash = body.phone_code_hash or _pending_hashes.get(phone)
-    if not phone_code_hash:
+
+    # Retrieve the pending hash and the EXACT client that generated it
+    pending = _pending_hashes.get(phone)
+    if not pending:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "phone_code_hash missing — call /send-code first.",
         )
 
+    phone_code_hash, client = pending
+    logger.debug("Using client %s for verify_code on %s", id(client), phone)
+
     try:
-        client = await tm_client.get_client(phone)
         await client.sign_in(phone, body.code, phone_code_hash=phone_code_hash)
-        await save_session(phone)
+        await save_session(phone, client)
         _pending_hashes.pop(phone, None)
         logger.info("Login successful for %s", phone)
-        return AuthStatusResponse(phone=phone, authenticated=True, message="Login successful.")
+        return AuthStatusResponse(
+            phone=phone, authenticated=True, message="Login successful."
+        )
 
     except SessionPasswordNeededError:
         # Account has 2FA — tell the frontend to show the password field
@@ -121,7 +160,9 @@ async def verify_code(body: VerifyCodeRequest) -> AuthStatusResponse:
     except PhoneCodeInvalidError:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid OTP code.")
     except PhoneCodeExpiredError:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "OTP expired — request a new code.")
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "OTP expired — request a new code."
+        )
     except Exception as exc:
         logger.exception("verify-code failed for %s", phone)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc))
@@ -134,12 +175,27 @@ async def verify_2fa(body: Verify2FARequest) -> AuthStatusResponse:
     Only needed if /verify-code returns `"message": "2FA_REQUIRED"`.
     """
     phone = body.phone.strip()
+
+    # After verify-code, the client should still be in _pending_hashes
+    # We need the same client that was partially authenticated
+    pending = _pending_hashes.get(phone)
+    if not pending:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "No pending session — call /verify-code first.",
+        )
+
+    _, client = pending
+    logger.debug("Using client %s for verify_2fa on %s", id(client), phone)
+
     try:
-        client = await tm_client.get_client(phone)
         await client.sign_in(password=body.password)
-        await save_session(phone)
+        await save_session(phone, client)
+        _pending_hashes.pop(phone, None)  # Clear after successful 2FA
         logger.info("2FA login successful for %s", phone)
-        return AuthStatusResponse(phone=phone, authenticated=True, message="2FA login successful.")
+        return AuthStatusResponse(
+            phone=phone, authenticated=True, message="2FA login successful."
+        )
 
     except PasswordHashInvalidError:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Incorrect 2FA password.")
@@ -161,3 +217,19 @@ async def auth_status(phone: str) -> AuthStatusResponse:
         authenticated=authorized,
         message="Session active." if authorized else "Not authenticated.",
     )
+
+
+@router.post("/clear-session")
+async def clear_session(phone: str) -> dict:
+    """
+    Clear the session for a given phone number.
+
+    Use this when the session is invalid (e.g., "no valid old session" error)
+    and the user needs to re-authenticate from scratch.
+    """
+    phone = phone.strip()
+    # Clear any pending hash for this phone
+    _pending_hashes.pop(phone, None)
+    # Clear the session from cache and database
+    await tm_client.clear_session(phone)
+    return {"message": "Session cleared.", "phone": phone}
