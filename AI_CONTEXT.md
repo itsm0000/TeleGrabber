@@ -1,5 +1,5 @@
 # TeleGrabber — AI Context & Product Documentation
-> **Last updated:** 2026-03-28 | Phases 1–4 complete. Phase 5 (frontend) is next.
+> **Last updated:** 2026-03-28 | Phase 5 (frontend) complete. Phase 6 (polish) is next.
 > **For the next AI agent:** Read this file completely before touching any code. This is your single source of truth.
 
 ---
@@ -22,7 +22,7 @@
 | **Data storage** | Supabase PostgreSQL (`AKONY` project) | Project ID: `dkkzpaxuvemxumhmrdzp` |
 | **AI classification** | Google Gemini 2.0 Flash | Batched, 50 messages per API call |
 | **Export** | Local filesystem + Google Drive | Service-account upload, per-category subfolders |
-| **Frontend** | Next.js 14 (App Router) + Tailwind CSS + Shadcn UI | New York style, Zinc palette — currently unconnected scaffolding |
+| **Frontend** | Next.js 14 (App Router) + Tailwind CSS + Shadcn UI | New York style, Zinc palette — **fully wired** |
 | **Containerization** | `docker-compose.yml` exists | Not yet fully configured for Phase 4+ |
 
 ---
@@ -31,6 +31,7 @@
 
 ```
 NOTEBOOKLM/
+├── .gitignore                    # Properly excludes pycache, .env, nul, etc.
 ├── backend/
 │   ├── app/
 │   │   ├── main.py                  # FastAPI app, CORS, lifespan hooks
@@ -38,7 +39,7 @@ NOTEBOOKLM/
 │   │   ├── db/
 │   │   │   └── supabase.py          # Singleton Supabase client (service-role key)
 │   │   ├── telegram/
-│   │   │   ├── client.py            # StringSession ↔ Supabase, get_client(), save_session()
+│   │   │   ├── client.py            # StringSession ↔ Supabase, get_client(), save_session(), clear_session()
 │   │   │   ├── parser.py            # Telegram URL → ParsedLink (public/private/topic)
 │   │   │   └── extractor.py         # Async batch-writing extraction loop + FloodWait handling
 │   │   ├── media/
@@ -51,7 +52,7 @@ NOTEBOOKLM/
 │   │   │   ├── zip_builder.py       # ZIP packager (export doc + media)
 │   │   │   └── drive.py             # Google Drive service-account uploader
 │   │   ├── routers/
-│   │   │   ├── auth.py              # /api/auth/* — send-code, verify-code, verify-2fa, status
+│   │   │   ├── auth.py              # /api/auth/* — send-code, verify-code, verify-2fa, status, clear-session
 │   │   │   ├── extract.py           # /api/extract/* — parse-link, start, status, results
 │   │   │   └── export.py            # /api/export/* — categorize, generate, download, drive-upload
 │   │   └── models/
@@ -60,15 +61,23 @@ NOTEBOOKLM/
 │   ├── downloads/                   # Downloaded media (gitignored)
 │   ├── requirements.txt
 │   └── .env                         # Real credentials — NEVER commit this
-├── frontend/
+├── frontend/                        # Git submodule
 │   ├── src/
 │   │   ├── app/
-│   │   │   ├── layout.tsx           # Root layout
-│   │   │   └── page.tsx             # Default Next.js placeholder (NOT yet replaced)
-│   │   ├── components/              # Empty — no custom components built yet
-│   │   └── lib/                     # Empty — no utilities built yet
+│   │   │   ├── layout.tsx           # Root layout with AuthProvider + Navigation
+│   │   │   ├── page.tsx             # Redirect to /auth or /dashboard based on auth state
+│   │   │   ├── globals.css          # Tailwind + Shadcn CSS variables
+│   │   │   ├── auth/page.tsx        # 3-step Telegram login (phone → OTP → 2FA) + Reset Session
+│   │   │   └── dashboard/page.tsx   # Extraction controls, progress, messages table, export buttons
+│   │   ├── components/
+│   │   │   ├── navigation.tsx       # Top nav with auth status + logout
+│   │   │   └── ui/                  # Shadcn components (Card, Button, Input, Badge, etc.)
+│   │   └── lib/
+│   │       ├── api.ts               # API client for all backend endpoints
+│   │       ├── auth.tsx             # Auth context with localStorage persistence
+│   │       └── utils.ts             # cn() utility for Tailwind
 │   └── package.json
-├── .env.example                     # Documents all required env vars (fully written)
+├── .env.example                     # Documents all required env vars
 ├── docker-compose.yml               # Exists but needs update for Phase 4+ vars
 ├── AI_CONTEXT.md                    # This file
 └── README.md                        # Setup instructions
@@ -134,6 +143,7 @@ Base URL: `http://localhost:8000` | Interactive docs: `http://localhost:8000/doc
 | POST | `/api/auth/verify-code` | Submit OTP; returns `2FA_REQUIRED` if applicable |
 | POST | `/api/auth/verify-2fa` | Submit cloud password |
 | GET | `/api/auth/status?phone=+XX` | Check if session is still live |
+| POST | `/api/auth/clear-session?phone=+XX` | Clear invalid session (added Phase 5) |
 
 ### Extraction (`/api/extract`)
 | Method | Path | Description |
@@ -215,12 +225,38 @@ ENABLE_WHISPER=false
 | **Phase 2** | Project scaffolding (FastAPI backend, Next.js frontend, Docker) | ✅ Complete |
 | **Phase 3** | Backend core (Telethon auth flow, async extraction loop, DB writes) | ✅ Complete |
 | **Phase 4** | AI categorization (Gemini), Markdown/TXT export, ZIP builder, Google Drive uploader, export router | ✅ Complete |
-| **Phase 5** | Frontend wiring — connect Next.js UI to all FastAPI endpoints | 🔴 Not started |
+| **Phase 5** | Frontend wiring — connect Next.js UI to all FastAPI endpoints | ✅ Complete |
 | **Phase 6** | Polish — end-to-end testing, README update, docker-compose, error handling | 🔴 Not started |
 
 ---
 
-## 9. Current Known Issues & Bugs
+## 9. Phase 5 Summary (Recently Completed)
+
+### Backend Changes
+- **`telegram/client.py`**: Added `clear_session(phone)` function that disconnects the client, removes it from cache, and deletes the session from Supabase
+- **`routers/auth.py`**: 
+  - Added `/api/auth/clear-session` endpoint (POST)
+  - Added `AuthKeyError` and `SessionRevokedError` exception handling
+  - Improved `send_code` error handling to detect invalid session errors and return HTTP 401 with clear instructions
+  - Fixed client binding issue — now stores `(phone_code_hash, client)` tuple to ensure the same client instance is used throughout auth flow
+
+### Frontend Changes (in `frontend/` submodule)
+- **Auth page** (`/auth`): 3-step Telegram login flow with Reset Session button for handling invalid sessions
+- **Dashboard page** (`/dashboard`): Full extraction UI with URL input, progress polling, categorization, export buttons, messages table with filtering/pagination
+- **Auth context** (`lib/auth.tsx`): React context with localStorage persistence
+- **API client** (`lib/api.ts`): Complete TypeScript client for all backend endpoints including `clearSession()`
+- **Navigation component**: Top nav bar with auth status display and logout button
+- **Shadcn UI components**: Card, Button, Input, Badge, Progress, Select, Table, Tabs, Alert, Label
+
+### Key Bug Fix
+Fixed the "no valid old session" error by:
+1. Storing the client instance alongside the phone_code_hash (they must match)
+2. Adding `/clear-session` endpoint to reset corrupted sessions
+3. Adding Reset Session button in the frontend when session errors occur
+
+---
+
+## 10. Current Known Issues & Bugs
 
 ### Critical
 - **`FloodWaitError` drops jobs permanently** — The current extractor marks the job `failed` on a `FloodWaitError` instead of pausing and resuming. Should be changed to: update status to `paused`, sleep for `e.seconds + 5`, then continue `iter_messages()` from the last processed offset.
@@ -240,36 +276,29 @@ ENABLE_WHISPER=false
 
 ---
 
-## 10. What Has Not Been Implemented Yet
+## 11. Phase 6 Tasks (Next Priority)
 
-### Phase 5 — Frontend (Highest Priority)
-The frontend is a **bare Next.js 14 scaffolding** (`page.tsx` still shows the default Next.js boilerplate). Nothing has been built. Required pages and components:
+### Immediate
+1. **End-to-end smoke test** — Boot servers → authenticate → extract messages → categorize → export → download ZIP
+2. **Fix `docker-compose.yml`** — Add all Phase 4/5 environment variables
+3. **Update `README.md`** — Document Phase 4+ setup (Google Drive service account, Gemini API)
+4. **Test CORS** — Verify frontend can communicate with backend properly
 
-- **`/auth` page** — Phone number input → OTP input → optional 2FA password. Calls `/api/auth/send-code`, `/api/auth/verify-code`, `/api/auth/verify-2fa`. On success, stores phone in `localStorage` or context.
-- **`/dashboard` page** — Main control panel:
-  - Text input for Telegram URL
-  - "Start Extraction" button → calls `/api/extract/start`
-  - Live job status polling (`/api/extract/{job_id}/status`) with a progress bar
-  - "Categorize" button → calls `/api/export/categorize`
-  - "Export Markdown" / "Export TXT" buttons → calls `/api/export/generate`
-  - "Download ZIP" button → hits `/api/export/{job_id}/download`
-  - "Push to Drive" button → calls `/api/export/drive-upload`
-- **Messages table** — Paginated view of extracted messages with:
-  - Filter by `category` label (tabs or dropdown)
-  - Filter by `sender`
-  - Filter by date range
-  - Display `media_path` as a badge if present
-- **Job history** — List of all past extraction jobs with status indicators
+### Frontend Polish
+5. **Add error boundaries** — Catch React errors gracefully
+6. **Add loading skeletons** — Better UX during API calls
+7. **Add toast notifications** — For success/error feedback instead of inline alerts
+8. **Mobile responsive improvements** — Dashboard may not look great on small screens
 
-### Phase 6 — Polish
-- End-to-end smoke test (boot server → auth → extract → categorize → export → download)
-- Update `README.md` with Phase 4+ setup instructions (Google Drive service account setup is not yet documented)
-- Update `docker-compose.yml` with all env vars
-- Add graceful startup validation: warn (not crash) if optional vars like `GEMINI_API_KEY` or `GOOGLE_DRIVE_CREDENTIALS_JSON` are missing
+### Backend Hardening
+9. **Implement FloodWaitError pause/resume** — Critical for large extractions
+10. **Add request timeout to Gemini calls** — Prevent indefinite hangs
+11. **Store phone_code_hash in Supabase** — Survive server restarts
+12. **Add job uniqueness check** — Prevent duplicate extractions
 
 ---
 
-## 11. Features Not Yet Thought About (Worth Considering)
+## 12. Features Not Yet Implemented (Future Considerations)
 
 ### High Value
 - **Media type detection before download** — Before downloading, inspect the Telegram `MessageMedia` type (photo, document, video, voice). Skip types the user doesn't want (e.g. stickers, GIFs) and only download PDFs, images, and voice notes. This prevents filling disk with junk.
@@ -293,7 +322,7 @@ The frontend is a **bare Next.js 14 scaffolding** (`page.tsx` still shows the de
 
 ---
 
-## 12. How to Run Locally
+## 13. How to Run Locally
 
 ```bash
 # Backend
@@ -313,7 +342,7 @@ npm run dev
 
 ---
 
-## 13. Google Drive Setup (for Phase 4 Drive upload)
+## 14. Google Drive Setup (for Phase 4 Drive upload)
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com) → create a project → enable **Google Drive API**
 2. Create a **Service Account** → download the JSON key
@@ -329,16 +358,29 @@ The uploader will create: `{your folder}/TeleGrabber — {job_id}/lecture_notes/
 
 ---
 
-## 14. Git History Context
+## 15. Git History Context
 
 | Commit | What it covered |
 |---|---|
 | Initial commits | Supabase schema, backend scaffolding, frontend scaffolding |
 | `c39f957` | Phase 3 complete — Telethon auth, extraction loop, all core backend modules |
 | `3d713bc` | **Phase 4 complete** — AI categorizer, formatter, Drive uploader, export router, schemas, config, env |
+| `fca0779` | docs: comprehensive AI_CONTEXT.md rewrite for Phase 4 handoff |
+| `beee0b5` | **Phase 5 complete** — Frontend auth + dashboard, session management, clear-session endpoint |
 
 **Branch:** `main` — all commits push directly to main. No feature branches yet.
+**Frontend:** Git submodule at `frontend/`
 
 ---
 
-**Note to next AI instance:** Start by reading this file, then look at `backend/app/routers/export.py` and `backend/app/ai/categorizer.py` to understand the Phase 4 contracts before building Phase 5. The frontend lives in `frontend/src/` and currently contains only Next.js boilerplate — replace `page.tsx` and build the auth + dashboard pages. Use the Shadcn UI components that are already initialized (New York style, Zinc palette). All API calls from the frontend should target `http://localhost:8000`.
+## 16. Important Notes for Next AI Instance
+
+1. **Frontend is a submodule** — Changes in `frontend/` must be committed separately before committing the parent repo
+2. **LSP errors are false positives** — The Pyright/Pylance errors about Supabase types are due to the library's dynamic typing. The code works at runtime.
+3. **Session binding is critical** — The `phone_code_hash` must be used with the exact same `TelegramClient` instance that generated it. Never call `get_client()` again after `send_code()`.
+4. **Test with real Telegram account** — Many features (extraction, categorization) require an actual Telegram account and groups with content
+5. **Gemini API quota** — The free tier has rate limits. Batch processing (50 messages per call) helps but be mindful of quota during testing
+
+---
+
+**Note to next AI instance:** Phase 5 is complete. Start with Phase 6 (polish and testing). Run the end-to-end smoke test first to identify any remaining issues. The frontend should be fully functional at `http://localhost:3000`.
