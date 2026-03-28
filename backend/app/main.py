@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import auth, extract
+from app.routers import auth, extract, export
 from app.telegram.client import disconnect_all
 
 logging.basicConfig(
@@ -53,6 +53,7 @@ app.add_middleware(
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(auth.router)
 app.include_router(extract.router)
+app.include_router(export.router)
 
 
 # ── Health check ──────────────────────────────────────────────────────────────

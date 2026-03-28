@@ -10,6 +10,14 @@ class Settings(BaseSettings):
     
     gemini_api_key: str = ""
     
+    # Google Drive (optional — export works without these)
+    google_drive_credentials_json: str = ""    # abs path to service-account .json
+    google_drive_folder_id: str = ""           # target Drive folder ID
+
+    # Local export + download directories
+    export_dir: str = "exports"
+    download_dir: str = "downloads"
+
     cors_origins: list[str] = ["http://localhost:3000"]
     
     enable_whisper: bool = False
