@@ -42,7 +42,7 @@ async def download_media(
         return None, None
 
     chat_id = str(getattr(entity, "id", "unknown"))
-    dest_dir = settings.download_dir / chat_id
+    dest_dir = Path(settings.download_dir) / chat_id
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Photo ─────────────────────────────────────────────────────────────────
@@ -50,7 +50,7 @@ async def download_media(
         filename = f"{msg.id}.jpg"
         dest = dest_dir / filename
         await msg.download_media(file=str(dest))
-        return _relative(dest), "photo"
+        return await _upload_and_cleanup(dest, chat_id, filename), "photo"
 
     # ── Document (file, voice, video, audio) ─────────────────────────────────
     if isinstance(msg.media, MessageMediaDocument):
@@ -64,9 +64,49 @@ async def download_media(
         else:
             await msg.download_media(file=str(dest))
 
-        return _relative(dest), media_type
+        return await _upload_and_cleanup(dest, chat_id, filename), media_type
 
     return None, None
+
+async def _upload_and_cleanup(dest: Path, chat_id: str, filename: str) -> str:
+    """Upload to Supabase Storage and delete local file to save disk space."""
+    from app.db.supabase import get_supabase
+    supabase = get_supabase()
+    
+    storage_path = f"{chat_id}/{filename}"
+    
+    try:
+        import asyncio
+        with open(dest, "rb") as f:
+            # Read file bytes to avoid passing a closed file handle to the thread
+            file_bytes = f.read()
+            
+        def _sync_upload():
+            return supabase.storage.from_("telegrabber-media").upload(
+                path=storage_path, 
+                file=file_bytes,
+                file_options={"upsert": "true"}
+            )
+            
+        # Run the synchronous upload in a thread pool to avoid blocking the event loop
+        await asyncio.to_thread(_sync_upload)
+
+        
+        # Get public URL
+        public_url = supabase.storage.from_("telegrabber-media").get_public_url(storage_path)
+    except Exception as e:
+        logger.error(f"Failed to upload {filename} to Supabase: {e}")
+        # Fallback to local path if upload fails
+        return _relative(dest)
+        
+    # Instantly delete local file to save disk space!
+    try:
+        if dest.exists():
+            dest.unlink()
+    except Exception as e:
+        logger.error(f"Failed to delete local temp file {dest}: {e}")
+        
+    return public_url
 
 
 async def _chunked_download(msg: Message, dest: Path) -> None:
@@ -106,6 +146,6 @@ def _get_filename(doc, msg_id: int, media_type: str) -> str:
 def _relative(path: Path) -> str:
     """Return path relative to the downloads root for DB storage."""
     try:
-        return str(path.relative_to(settings.download_dir))
+        return str(path.relative_to(Path(settings.download_dir)))
     except ValueError:
         return str(path)

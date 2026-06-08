@@ -39,3 +39,12 @@ backend/exports/
 
 # Test files
 supabase.sql
+# Secrets - DO NOT COMMIT
+backend/.env
+backend/token.json
+backend/google_credentials.json
+run_migration.js
+*.env
+*.env.local
+token.json
+google_credentials.json

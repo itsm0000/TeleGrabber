@@ -22,7 +22,8 @@ import json
 import logging
 from uuid import UUID
 
-import google.generativeai as genai
+
+import httpx
 
 from app.config import settings
 from app.db.supabase import get_supabase
@@ -59,7 +60,7 @@ def _build_prompt(messages: list[dict]) -> str:
 
 
 def _parse_response(raw: str) -> dict[str, str]:
-    """Extract the JSON mapping from Gemini's response, stripping any markdown fences."""
+    """Extract the JSON mapping from the response, stripping any markdown fences."""
     raw = raw.strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
@@ -70,19 +71,13 @@ def _parse_response(raw: str) -> dict[str, str]:
 
 async def categorize_job(job_id: UUID) -> int:
     """
-    Fetch all uncategorized messages for `job_id`, call Gemini in batches,
+    Fetch all uncategorized messages for `job_id`, call Groq in batches,
     and upsert the category column back to Supabase.
 
     Returns the total number of messages categorized in this run.
     """
-    if not settings.gemini_api_key:
-        raise RuntimeError("GEMINI_API_KEY is not configured.")
-
-    genai.configure(api_key=settings.gemini_api_key)
-    model = genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
-        system_instruction=SYSTEM_PROMPT,
-    )
+    if not settings.groq_api_key:
+        raise RuntimeError("GROQ_API_KEY is not configured.")
 
     supabase = get_supabase()
 
@@ -100,26 +95,44 @@ async def categorize_job(job_id: UUID) -> int:
         return 0
 
     total_categorized = 0
+    groq_url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {settings.groq_api_key}",
+        "Content-Type": "application/json"
+    }
+
     # Process in batches of BATCH_SIZE
     for i in range(0, len(rows), BATCH_SIZE):
         batch = rows[i : i + BATCH_SIZE]
         prompt = _build_prompt(batch)
 
         try:
-            result = model.generate_content(prompt)
-            mapping: dict[str, str] = _parse_response(result.text)
-        except Exception:
-            logger.exception("Gemini categorization failed for batch starting at %d", i)
+            payload = {
+                "model": "llama-3.3-70b-versatile",
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt}
+                ],
+                "response_format": {"type": "json_object"}
+            }
+            # Need to use httpx synchronously or async. Since categorize_job is async, let's use httpx.AsyncClient
+            async with httpx.AsyncClient() as client:
+                res = await client.post(groq_url, headers=headers, json=payload, timeout=60.0)
+                res.raise_for_status()
+                data = res.json()
+                raw_text = data["choices"][0]["message"]["content"]
+                mapping: dict[str, str] = _parse_response(raw_text)
+        except Exception as e:
+            logger.exception("Groq categorization failed for batch starting at %d. Error: %s", i, e)
+            if 'raw_text' in locals():
+                logger.error("Raw text was: %s", raw_text)
             continue
 
-        # Build list of row updates
-        updates = [
-            {"id": row["id"], "category": mapping.get(str(row["message_id"]), "other")}
-            for row in batch
-        ]
-
-        # Upsert in one call — postgres primary-key conflict updates category
-        supabase.table("messages").upsert(updates).execute()
+        # Update each row individually to avoid NOT NULL constraint errors during upsert
+        for row in batch:
+            cat = mapping.get(str(row["message_id"]), "other")
+            supabase.table("messages").update({"category": cat}).eq("id", row["id"]).execute()
+            
         total_categorized += len(batch)
         logger.info(
             "Job %s: categorized messages %d–%d", job_id, i, i + len(batch) - 1

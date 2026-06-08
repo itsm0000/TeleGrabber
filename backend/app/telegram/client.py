@@ -17,7 +17,15 @@ async def get_client(phone: str) -> TelegramClient:
         client = _clients[phone]
         if not client.is_connected():
             await client.connect()
-        return client
+        # Verify the session is still valid
+        if not await client.is_user_authorized():
+            logger.warning(
+                "Cached client for %s is no longer authorized, recreating", phone
+            )
+            await client.disconnect()
+            del _clients[phone]
+        else:
+            return client
 
     # Fetch existing session from DB without raising errors if row doesn't exist
     supabase = get_supabase()
@@ -39,13 +47,20 @@ async def get_client(phone: str) -> TelegramClient:
         session_str = ""
     session = StringSession(session_str)
 
-    client = TelegramClient(
-        session, settings.telegram_api_id, settings.telegram_api_hash
-    )
-
-    await client.connect()
-    _clients[phone] = client
-    return client
+    from app.telegram.proxy import get_connected_client
+    
+    try:
+        client = await get_connected_client(
+            session, 
+            settings.telegram_api_id, 
+            settings.telegram_api_hash, 
+            explicit_proxy=settings.telegram_proxy
+        )
+        _clients[phone] = client
+        return client
+    except Exception as e:
+        logger.error(f"Failed to create connected client: {e}")
+        raise
 
 
 async def save_session(phone: str, client: TelegramClient | None = None) -> None:

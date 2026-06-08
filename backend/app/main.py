@@ -50,11 +50,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from fastapi.staticfiles import StaticFiles
+
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(auth.router)
 app.include_router(extract.router)
 app.include_router(export.router)
 
+# Mount the downloads directory to serve media files directly
+import os
+os.makedirs(settings.download_dir, exist_ok=True)
+app.mount("/media", StaticFiles(directory=settings.download_dir), name="media")
 
 # ── Health check ──────────────────────────────────────────────────────────────
 @app.get("/health", tags=["meta"])

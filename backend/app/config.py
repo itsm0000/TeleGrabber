@@ -3,12 +3,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     telegram_api_id: int
     telegram_api_hash: str
+    telegram_proxy: str = ""
     
     supabase_url: str
     supabase_anon_key: str
     supabase_service_role_key: str
     
-    gemini_api_key: str = ""
+    groq_api_key: str = ""
     
     # Google Drive (optional — export works without these)
     google_drive_credentials_json: str = ""    # abs path to service-account .json

@@ -108,6 +108,31 @@ async def download_zip(job_id: UUID):
     )
 
 
+@router.get("/{job_id}/download-doc")
+async def download_doc(job_id: UUID):
+    """
+    Stream just the export document (.md or .txt) as a download, without zipping.
+    Perfect for direct drag-and-drop into NotebookLM.
+    """
+    out_dir = Path(settings.export_dir) / str(job_id)
+    candidates = list(out_dir.glob(f"export_{job_id}.*")) if out_dir.exists() else []
+    export_file = next(
+        (p for p in candidates if p.suffix in (".md", ".txt")), None
+    )
+
+    if not export_file:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "No export file found for this job. Call POST /api/export/generate first.",
+        )
+
+    return FileResponse(
+        path=str(export_file),
+        filename=export_file.name,
+        media_type="text/markdown" if export_file.suffix == ".md" else "text/plain",
+    )
+
+
 @router.post("/drive-upload", response_model=DriveUploadResponse)
 async def drive_upload(body: DriveUploadRequest) -> DriveUploadResponse:
     """
